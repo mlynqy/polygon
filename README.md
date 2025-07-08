@@ -10,6 +10,7 @@
 
 需要安装的库：
 pip install python-telegram-bot requests
+
 python -m pip install --upgrade "python-telegram-bot[job-queue]"
 
 运行之后，在bot里输入： /绑定 <地址> <自定义备注信息>  
