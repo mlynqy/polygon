@@ -470,34 +470,151 @@ def parse_trc20_transfer(data):
 def get_account_resources(address):
     """获取账户资源信息（能量和带宽）"""
     try:
-        url = f"https://api.trongrid.io/v1/accounts/{address}"
-        headers = {'TRON-PRO-API-KEY': TRON_API_KEY} if TRON_API_KEY else {}
-        response = requests.get(url, headers=headers)
+        # 使用 TronPy 客户端直接获取账户信息
+        print(f"🔍 正在获取地址 {address[:10]}...{address[-6:]} 的资源信息...")
         
-        if response.status_code == 200:
-            data = response.json()
-            account_data = data.get('data', [{}])[0]
+        # 方法1: 使用 TronPy 客户端
+        try:
+            account = client.get_account(address)
+            print(f"📋 账户信息: {account}")
             
-            # 获取能量信息
-            energy_limit = account_data.get('account_resource', {}).get('energy_limit', 0)
-            energy_used = account_data.get('account_resource', {}).get('energy_used', 0)
-            energy_available = energy_limit - energy_used
+            # 获取账户资源
+            account_resource = client.get_account_resource(address)
+            print(f"📊 资源信息: {account_resource}")
             
-            # 获取带宽信息
-            net_limit = account_data.get('account_resource', {}).get('net_limit', 0)
-            net_used = account_data.get('account_resource', {}).get('net_used', 0)
-            net_available = net_limit - net_used
+            # 解析能量信息
+            energy_limit = account_resource.get('EnergyLimit', 0)
+            energy_used = account_resource.get('EnergyUsed', 0)
+            
+            # 解析带宽信息 - 优先使用质押获得的带宽
+            bandwidth_limit = account_resource.get('NetLimit', 0)
+            bandwidth_used = account_resource.get('NetUsed', 0)
+            
+            # 免费带宽信息
+            free_bandwidth_limit = account_resource.get('freeNetLimit', 600)
+            free_bandwidth_used = account_resource.get('freeNetUsed', 0)
+            
+            # 总带宽 = 质押带宽 + 免费带宽
+            total_bandwidth_limit = bandwidth_limit + free_bandwidth_limit
+            total_bandwidth_used = bandwidth_used + free_bandwidth_used
+            
+            # 计算可用资源
+            energy_available = max(0, energy_limit - energy_used)
+            bandwidth_available = max(0, total_bandwidth_limit - total_bandwidth_used)
+            
+            print(f"📊 解析结果:")
+            print(f"   ⚡ 能量: 总量={energy_limit:,}, 已用={energy_used:,}, 可用={energy_available:,}")
+            print(f"   📡 质押带宽: 总量={bandwidth_limit:,}, 已用={bandwidth_used:,}")
+            print(f"   📡 免费带宽: 总量={free_bandwidth_limit:,}, 已用={free_bandwidth_used:,}")
+            print(f"   📡 总带宽: 总量={total_bandwidth_limit:,}, 已用={total_bandwidth_used:,}, 可用={bandwidth_available:,}")
             
             return {
                 'energy_limit': energy_limit,
                 'energy_used': energy_used,
                 'energy_available': energy_available,
-                'bandwidth_limit': net_limit,
-                'bandwidth_used': net_used,
-                'bandwidth_available': net_available
+                'bandwidth_limit': total_bandwidth_limit,
+                'bandwidth_used': total_bandwidth_used,
+                'bandwidth_available': bandwidth_available
             }
+            
+        except Exception as tronpy_error:
+            print(f"⚠️ TronPy 客户端获取失败: {tronpy_error}")
+            
+        # 方法2: 使用 TronGrid API 作为备选
+        print(f"🔄 尝试使用 TronGrid API...")
+        
+        # 获取账户基本信息
+        url = f"https://api.trongrid.io/v1/accounts/{address}"
+        headers = {'TRON-PRO-API-KEY': TRON_API_KEY} if TRON_API_KEY else {}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"❌ 获取账户信息失败: HTTP {response.status_code}")
+            print(f"响应内容: {response.text[:200]}...")
+            return None
+            
+        data = response.json()
+        print(f"📋 API 响应: {json.dumps(data, indent=2, ensure_ascii=False)[:500]}...")
+        
+        if 'data' not in data or not data['data']:
+            print(f"❌ 账户数据为空")
+            return None
+            
+        account_data = data['data'][0]
+        
+        # 获取账户资源信息
+        resource_url = f"https://api.trongrid.io/wallet/getaccountresource"
+        resource_payload = {"address": address}
+        resource_response = requests.post(resource_url, json=resource_payload, headers=headers, timeout=10)
+        
+        # 初始化默认值
+        energy_limit = 0
+        energy_used = 0
+        bandwidth_limit = 0
+        bandwidth_used = 0
+        free_bandwidth_limit = 600  # TRON 当前免费带宽（2023年7月调整）
+        free_bandwidth_used = 0
+        
+        # 解析资源信息
+        if resource_response.status_code == 200:
+            resource_data = resource_response.json()
+            print(f"📊 资源 API 响应: {json.dumps(resource_data, indent=2, ensure_ascii=False)[:500]}...")
+            
+            # 能量信息
+            energy_limit = resource_data.get('EnergyLimit', 0)
+            energy_used = resource_data.get('EnergyUsed', 0)
+            
+            # 质押带宽信息
+            bandwidth_limit = resource_data.get('NetLimit', 0)
+            bandwidth_used = resource_data.get('NetUsed', 0)
+            
+            # 免费带宽信息
+            free_bandwidth_limit = resource_data.get('freeNetLimit', 600)
+            free_bandwidth_used = resource_data.get('freeNetUsed', 0)
+            
+        else:
+            print(f"⚠️ 获取资源详情失败: HTTP {resource_response.status_code}")
+            print(f"响应内容: {resource_response.text[:200]}...")
+            
+            # 尝试从账户基本信息中获取资源
+            account_resource = account_data.get('account_resource', {})
+            if account_resource:
+                energy_limit = account_resource.get('energy_limit', 0)
+                energy_used = account_resource.get('energy_used', 0)
+                bandwidth_limit = account_resource.get('net_limit', 0)
+                bandwidth_used = account_resource.get('net_used', 0)
+                free_bandwidth_limit = account_resource.get('free_net_limit', 600)
+                free_bandwidth_used = account_resource.get('free_net_used', 0)
+        
+        # 计算总带宽和可用资源
+        total_bandwidth_limit = bandwidth_limit + free_bandwidth_limit
+        total_bandwidth_used = bandwidth_used + free_bandwidth_used
+        energy_available = max(0, energy_limit - energy_used)
+        bandwidth_available = max(0, total_bandwidth_limit - total_bandwidth_used)
+        
+        print(f"📊 最终解析结果:")
+        print(f"   ⚡ 能量: 总量={energy_limit:,}, 已用={energy_used:,}, 可用={energy_available:,}")
+        print(f"   📡 质押带宽: 总量={bandwidth_limit:,}, 已用={bandwidth_used:,}")
+        print(f"   📡 免费带宽: 总量={free_bandwidth_limit:,}, 已用={free_bandwidth_used:,}")
+        print(f"   📡 总带宽: 总量={total_bandwidth_limit:,}, 已用={total_bandwidth_used:,}, 可用={bandwidth_available:,}")
+        
+        return {
+            'energy_limit': energy_limit,
+            'energy_used': energy_used,
+            'energy_available': energy_available,
+            'bandwidth_limit': total_bandwidth_limit,
+            'bandwidth_used': total_bandwidth_used,
+            'bandwidth_available': bandwidth_available
+        }
+        
+    except requests.exceptions.Timeout:
+        print(f"❌ 获取账户资源信息超时")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ 网络请求失败: {e}")
     except Exception as e:
-        print(f"获取账户资源信息失败: {e}")
+        print(f"❌ 获取账户资源信息失败: {e}")
+        import traceback
+        print(f"详细错误: {traceback.format_exc()}")
     
     return None
 
@@ -831,6 +948,156 @@ def format_transaction_message(tx, monitor_address, remark):
     elif contract_type == 'VoteWitnessContract':
         # 投票 - 跳过投票交易
         return None
+    
+    elif contract_type == 'DelegateResourceContract':
+        # 能量代理交易
+        parameter = contract.get('parameter', {}).get('value', {})
+        owner_addr_hex = parameter.get('owner_address', '')  # 代理方地址
+        receiver_addr_hex = parameter.get('receiver_address', '')  # 接收方地址
+        balance = parameter.get('balance', 0)  # 代理的TRX数量
+        resource = parameter.get('resource', 'ENERGY')  # 资源类型：ENERGY或BANDWIDTH
+        lock = parameter.get('lock', False)  # 是否锁定
+        
+        # 转换地址格式
+        try:
+            from tronpy.keys import to_base58check_address
+            if owner_addr_hex:
+                if len(owner_addr_hex) == 42 and owner_addr_hex.startswith('41'):
+                    from_addr = to_base58check_address(owner_addr_hex)
+                elif len(owner_addr_hex) == 40:
+                    from_addr = to_base58check_address('41' + owner_addr_hex)
+                else:
+                    from_addr = owner_addr_hex
+            
+            if receiver_addr_hex:
+                if len(receiver_addr_hex) == 42 and receiver_addr_hex.startswith('41'):
+                    to_addr = to_base58check_address(receiver_addr_hex)
+                elif len(receiver_addr_hex) == 40:
+                    to_addr = to_base58check_address('41' + receiver_addr_hex)
+                else:
+                    to_addr = receiver_addr_hex
+        except Exception as e:
+            print(f"能量代理地址转换错误: {e}")
+            from_addr = owner_addr_hex if owner_addr_hex else 'Unknown'
+            to_addr = receiver_addr_hex if receiver_addr_hex else 'Unknown'
+        
+        amount = balance / 1000000  # TRX转换
+        token_symbol = 'TRX'
+        
+        # 判断是否与监控地址相关
+        if from_addr == monitor_address or to_addr == monitor_address:
+            # 这是能量代理交易，使用特殊处理
+            transaction_direction = '代理能量'
+            
+            # 估算能量数量（1 TRX ≈ 14000 能量，这是大概估算）
+            estimated_energy = int(amount * 14000)
+            
+            # 构建能量代理专用消息格式
+            lock_status = '锁定' if lock else '未锁定'
+            
+            # 获取地址备注
+            from_remark = ''
+            to_remark = ''
+            all_bindings = get_user_bindings()
+            for _, addr, addr_remark in all_bindings:
+                if addr == from_addr:
+                    from_remark = f'  （← {addr_remark}）'
+                elif addr == to_addr:
+                    to_remark = f'  （← {addr_remark}）'
+            
+            # 构建标题
+            if to_addr == monitor_address:
+                title = f"{remark} 收到 {amount:.6f} {token_symbol} 的 能量"
+            else:
+                title = f"{remark} 代理 {amount:.6f} {token_symbol} 的 能量"
+            
+            message = f"{title}\n\n"
+            message += f"交易类型：#代理能量\n\n"
+            message += f"锁定状态：{lock_status}\n\n"
+            message += f"代理数量：{amount:.6f} {token_symbol}\n\n"
+            message += f"预估资源：{estimated_energy:,} 能量\n\n"
+            message += f"代理地址：{from_addr}{from_remark}\n\n"
+            message += f"接收地址：{to_addr}{to_remark}\n\n"
+            message += f"交易时间：{block_time}\n\n"
+            message += f"交易哈希：{tx_hash}\n\n"
+            message += f"区块哈希：{block_hash}\n\n"
+            message += f"区块高度：{block_number}"
+            
+            return message
+        else:
+            # 跳过与监控地址无关的交易
+            return None
+    
+    elif contract_type == 'UnDelegateResourceContract':
+        # 回收能量交易
+        parameter = contract.get('parameter', {}).get('value', {})
+        owner_addr_hex = parameter.get('owner_address', '')  # 回收方地址
+        receiver_addr_hex = parameter.get('receiver_address', '')  # 原接收方地址
+        balance = parameter.get('balance', 0)  # 回收的TRX数量
+        resource = parameter.get('resource', 'ENERGY')  # 资源类型：ENERGY或BANDWIDTH
+        
+        # 转换地址格式
+        try:
+            from tronpy.keys import to_base58check_address
+            if owner_addr_hex:
+                if len(owner_addr_hex) == 42 and owner_addr_hex.startswith('41'):
+                    from_addr = to_base58check_address(owner_addr_hex)
+                elif len(owner_addr_hex) == 40:
+                    from_addr = to_base58check_address('41' + owner_addr_hex)
+                else:
+                    from_addr = owner_addr_hex
+            
+            if receiver_addr_hex:
+                if len(receiver_addr_hex) == 42 and receiver_addr_hex.startswith('41'):
+                    to_addr = to_base58check_address(receiver_addr_hex)
+                elif len(receiver_addr_hex) == 40:
+                    to_addr = to_base58check_address('41' + receiver_addr_hex)
+                else:
+                    to_addr = receiver_addr_hex
+        except Exception as e:
+            print(f"回收能量地址转换错误: {e}")
+            from_addr = owner_addr_hex if owner_addr_hex else 'Unknown'
+            to_addr = receiver_addr_hex if receiver_addr_hex else 'Unknown'
+        
+        amount = balance / 1000000  # TRX转换
+        token_symbol = 'TRX'
+        
+        # 判断是否与监控地址相关
+        if from_addr == monitor_address or to_addr == monitor_address:
+            # 这是回收能量交易，使用特殊处理
+            transaction_direction = '回收能量'
+            
+            # 估算失去的能量数量（1 TRX ≈ 14000 能量）
+            lost_energy = int(amount * 14000)
+            
+            # 获取地址备注
+            to_remark = ''
+            all_bindings = get_user_bindings()
+            for _, addr, addr_remark in all_bindings:
+                if addr == to_addr:
+                    to_remark = f'  （← {addr_remark}）'
+            
+            # 构建标题
+            if to_addr == monitor_address:
+                title = f"{remark} 失去 {amount:.6f} {token_symbol} 的 能量"
+            else:
+                title = f"{remark} 回收 {amount:.6f} {token_symbol} 的 能量"
+            
+            message = f"{title}\n\n"
+            message += f"交易类型：#回收能量\n\n"
+            message += f"回收数量：{amount:.6f} {token_symbol}\n\n"
+            message += f"失去资源：{lost_energy:,} 能量\n\n"
+            message += f"代理地址：{from_addr}\n\n"
+            message += f"回收地址：{to_addr}{to_remark}\n\n"
+            message += f"交易时间：{block_time}\n\n"
+            message += f"交易哈希：{tx_hash}\n\n"
+            message += f"区块哈希：{block_hash}\n\n"
+            message += f"区块高度：{block_number}"
+            
+            return message
+        else:
+            # 跳过与监控地址无关的交易
+            return None
     
     elif contract_type == 'TransferAssetContract':
         # TRC-10代币转账
