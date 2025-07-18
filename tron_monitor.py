@@ -989,8 +989,8 @@ def format_transaction_message(tx, monitor_address, remark):
             # 这是能量代理交易，使用特殊处理
             transaction_direction = '代理能量'
             
-            # 估算能量数量（1 TRX ≈ 14000 能量，这是大概估算）
-            estimated_energy = int(amount * 14000)
+            # 估算能量数量（质押1 TRX ≈ 11 能量，基于质押获得的动态分配比例）
+            estimated_energy = int(amount * 11)
             
             # 构建能量代理专用消息格式
             lock_status = '锁定' if lock else '未锁定'
@@ -1067,8 +1067,8 @@ def format_transaction_message(tx, monitor_address, remark):
             # 这是回收能量交易，使用特殊处理
             transaction_direction = '回收能量'
             
-            # 估算失去的能量数量（1 TRX ≈ 14000 能量）
-            lost_energy = int(amount * 14000)
+            # 估算失去的能量数量（质押1 TRX ≈ 11 能量，基于质押获得的动态分配比例）
+            lost_energy = int(amount * 11)
             
             # 获取地址备注
             to_remark = ''
