@@ -2,11 +2,13 @@
 
 用的python编写的
 
+适配于ETH v2 api key
+
 用于监控polygon的POL，usdt，usdc交易信息并通知
 
 目前初步写完了，如果有需要完善的地方请提交issues
 
-进代码将tg bot的token和api key换上  //api key申请地址：https://polygonscan.com/
+进代码将tg bot的token和api key换上  //api key申请地址：[https://polygonscan.com/](https://etherscan.io/)
 
 需要安装的库：
 
