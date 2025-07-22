@@ -1,127 +1,235 @@
-import re, sqlite3, requests
+import os
+import sqlite3
+import requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, filters
 
+# === 配置 ===
 TELEGRAM_TOKEN = 'token'
-POLYGONSCAN_API_KEY = '密钥'
+POLYGONSCAN_API_KEY = 'key'
 DB_FILE = 'db.sqlite3'
-CHECK_INTERVAL = 10  # 秒
+CHECK_INTERVAL = 30
 
-TOKEN_CONTRACTS = {
-    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': 'USDT',
-    '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': 'USDC',
-    '0x455e53cbb86018ac2b8092fdcd39d8444affc3f6': 'POL',
+# 监控的代币合约地址
+MONITORED_TOKENS = {
+    '0x455e53bd25bde7b73cd1f4a44a0e5964e4e9a2cd': {'symbol': 'POL', 'decimals': 18},  # POL代币
+    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': {'symbol': 'USDT', 'decimals': 6},  # USDT代币
+    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': {'symbol': 'USDC', 'decimals': 6},  # USDC代币
 }
 
+# === 初始化数据库 ===
 def init_db():
-    conn = sqlite3.connect(DB_FILE); c = conn.cursor()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     c.execute('''
-      CREATE TABLE IF NOT EXISTS bindings (
-        chat_id INTEGER NOT NULL,
-        address TEXT NOT NULL,
-        remark TEXT, last_tx TEXT, last_token_tx TEXT,
-        PRIMARY KEY(chat_id, address)
-      )''')
-    conn.commit(); conn.close()
+        CREATE TABLE IF NOT EXISTS bindings (
+            chat_id INTEGER NOT NULL,
+            address TEXT NOT NULL,
+            remark TEXT,
+            last_tx TEXT,
+            last_pol_tx TEXT,
+            last_usdt_tx TEXT,
+            last_usdc_tx TEXT,
+            PRIMARY KEY (chat_id, address)
+        )
+    ''')
+    # 尝试添加字段（旧用户兼容）
+    try:
+        c.execute("ALTER TABLE bindings ADD COLUMN remark TEXT")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE bindings ADD COLUMN last_pol_tx TEXT")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE bindings ADD COLUMN last_usdt_tx TEXT")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE bindings ADD COLUMN last_usdc_tx TEXT")
+    except:
+        pass
+    conn.commit()
+    conn.close()
 
 def get_db_conn():
     return sqlite3.connect(DB_FILE)
 
-async def bind_address(update, ctx, addr, remark):
-    chat = update.message.chat_id; addr = addr.lower()
-    conn = get_db_conn(); c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO bindings(chat_id,address,remark) VALUES(?,?,?)',(chat,addr,remark))
-    conn.commit(); conn.close()
-    await update.message.reply_text(f"✅ 已绑定：{addr}\n📌 备注：{remark or '无备注'}")
+# === /start ===
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "👋 欢迎使用 Polygon Bot\n"
+        "🧾 可用命令：\n"
+        "/绑定 <地址> <备注> 绑定地址\n"
+        "/解绑 <地址> 删除绑定\n"
+        "/我的绑定 查看已绑定地址"
+    )
 
-async def unbind_address(update, ctx, addr):
-    chat = update.message.chat_id; addr = addr.lower()
-    conn = get_db_conn(); c = conn.cursor()
-    c.execute('DELETE FROM bindings WHERE chat_id=? AND address=?',(chat,addr))
-    conn.commit(); cnt = c.rowcount; conn.close()
-    await update.message.reply_text("✅ 已解绑："+addr if cnt else "⚠️ 未找到绑定："+addr)
+# === /绑定 <地址> <备注> ===
+def bind_address(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    if len(context.args) < 1:
+        update.message.reply_text("❌ 用法错误：/绑定 <地址> <备注>")
+        return
 
-async def list_bindings(update, ctx):
-    chat = update.message.chat_id
-    conn = get_db_conn(); c = conn.cursor()
-    rows = c.execute('SELECT address,remark FROM bindings WHERE chat_id=?',(chat,)).fetchall()
+    address = context.args[0].lower()
+    remark = " ".join(context.args[1:]) if len(context.args) > 1 else ""
+
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO bindings (chat_id, address, remark)
+        VALUES (?, ?, ?)
+    ''', (chat_id, address, remark))
+    conn.commit()
     conn.close()
+
+    update.message.reply_text(f"✅ 已绑定地址：{address}\n📌 备注：{remark}")
+
+# === /解绑 <地址> ===
+def unbind_address(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    if len(context.args) != 1:
+        update.message.reply_text("❌ 用法错误：/解绑 <地址>")
+        return
+
+    address = context.args[0].lower()
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('DELETE FROM bindings WHERE chat_id = ? AND address = ?', (chat_id, address))
+    conn.commit()
+    affected = c.rowcount
+    conn.close()
+
+    if affected:
+        update.message.reply_text(f"✅ 已解绑地址：{address}")
+    else:
+        update.message.reply_text(f"⚠️ 未找到绑定：{address}")
+
+# === /我的绑定 ===
+def list_bindings(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('SELECT address, remark FROM bindings WHERE chat_id = ?', (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+
     if not rows:
-        return await update.message.reply_text("📭 无绑定地址")
-    text = "📦 你的绑定：\n\n"
-    for a,r in rows:
-        text += f"🔗 {a}\n📝 {r or '无备注'}\n\n"
-    await update.message.reply_text(text)
+        update.message.reply_text("📭 当前无绑定")
+        return
 
-def get_latest_tx(addr):
-    r = requests.get(
-        f'https://api.polygonscan.com/api?module=account&action=txlist&address={addr}&sort=desc&apikey={POLYGONSCAN_API_KEY}'
+    msg = "📦 当前绑定地址：\n\n"
+    for addr, remark in rows:
+        msg += f"🔗 {addr}\n📝 {remark or '无备注'}\n\n"
+    update.message.reply_text(msg)
+
+# === 查询地址最新代币交易 ===
+def get_latest_token_transfers(address):
+    """获取地址的最新代币转账记录"""
+    url = (
+        f'https://api.etherscan.io/v2/api'
+        f'?chainid=137&module=account&action=tokentx&address={address}'
+        f'&startblock=0&endblock=99999999&sort=desc&apikey={POLYGONSCAN_API_KEY}'
     )
-    j = r.json()
-    return j['result'][0] if j.get('status')=='1' and j.get('result') else None
+    try:
+        res = requests.get(url, timeout=10)
+        data = res.json()
+        if data.get('status') != '1':
+            return []
+        
+        # 只返回监控的代币交易
+        filtered_txs = []
+        for tx in data['result']:
+            contract_addr = tx.get('contractAddress', '').lower()
+            if contract_addr in MONITORED_TOKENS:
+                filtered_txs.append(tx)
+        
+        return filtered_txs
+    except:
+        return []
 
-def get_latest_token_tx(addr):
-    r = requests.get(
-        f'https://api.polygonscan.com/api?module=account&action=tokentx&address={addr}&sort=desc&apikey={POLYGONSCAN_API_KEY}'
-    )
-    j = r.json()
-    if j.get('status')!='1':
-        return None
-    for tx in j['result']:
-        c = tx['contractAddress'].lower()
-        if c in TOKEN_CONTRACTS:
-            return tx
-    return None
+# === 定时轮询交易 ===
+def check_all_transactions(context: CallbackContext):
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('SELECT chat_id, address, remark, last_pol_tx, last_usdt_tx, last_usdc_tx FROM bindings')
+    rows = c.fetchall()
 
-async def check_all_transactions(ctx):
-    conn = get_db_conn(); c = conn.cursor()
-    rows = c.execute('SELECT chat_id,address,remark,last_tx,last_token_tx FROM bindings').fetchall()
+    for chat_id, address, remark, last_pol_tx, last_usdt_tx, last_usdc_tx in rows:
+        token_txs = get_latest_token_transfers(address)
+        if not token_txs: continue
 
-    for chat, addr, remark, ltx, ltt in rows:
-        tx = get_latest_tx(addr)
-        if tx and tx['hash'] != ltx:
-            val = int(tx['value'])/1e18; frm, to = tx['from'].lower(), tx['to'].lower()
-            dir = '📥 入账' if to==addr else '📤 出账'; sgn = '+' if dir.startswith('📥') else '-'
-            lbl = f"{remark} ({addr})" if remark else addr
-            await ctx.bot.send_message(chat_id=chat, text=(
-                f"📢 [{lbl}] 新 POL 交易\n"
-                f"{dir}: {sgn}{val:.4f} POL\n到账地址: {to}\n🔑 Hash: {tx['hash']}"
-            ))
-            c.execute('UPDATE bindings SET last_tx=? WHERE chat_id=? AND address=?',(tx['hash'],chat,addr))
+        # 按代币类型分组处理
+        last_tx_map = {
+            '0x455e53bd25bde7b73cd1f4a44a0e5964e4e9a2cd': last_pol_tx,
+            '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': last_usdt_tx,
+            '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': last_usdc_tx,
+        }
+        
+        new_last_tx_map = last_tx_map.copy()
+        
+        for tx in token_txs:
+            contract_addr = tx['contractAddress'].lower()
+            tx_hash = tx['hash']
+            
+            # 跳过已处理的交易
+            if tx_hash == last_tx_map.get(contract_addr):
+                continue
+                
+            token_info = MONITORED_TOKENS[contract_addr]
+            value = int(tx['value']) / (10 ** token_info['decimals'])
+            from_addr = tx['from'].lower()
+            to_addr = tx['to'].lower()
+            direction = '📥 入账' if to_addr == address.lower() else '📤 出账'
+            sign = '+' if direction == '📥 入账' else '-'
 
-        tok = get_latest_token_tx(addr)
-        if tok and tok['hash'] != ltt:
-            val = int(tok['value'])/(10**int(tok['tokenDecimal']))
-            frm, to = tok['from'].lower(), tok['to'].lower()
-            dir = '📥 入账' if to==addr else '📤 出账'; sgn = '+' if dir.startswith('📥') else '-'
-            sym = TOKEN_CONTRACTS.get(tok['contractAddress'].lower(), 'TOKEN')
-            lbl = f"{remark} ({addr})" if remark else addr
-            await ctx.bot.send_message(chat_id=chat, text=(
-                f"📢 [{lbl}] 新 {sym} 交易\n"
-                f"{dir}: {sgn}{val:.4f} {sym}\n到账地址: {to}\n🔑 Hash: {tok['hash']}"
-            ))
-            c.execute('UPDATE bindings SET last_token_tx=? WHERE chat_id=? AND address=?',(tok['hash'],chat,addr))
+            label = f"{remark} ({address})" if remark else address
+            msg = (
+                f"📢 [{label}] 有新{token_info['symbol']}交易\n"
+                f"{direction}: {sign}{value:.4f} {token_info['symbol']}\n"
+                f"🔑 交易哈希: {tx_hash}"
+            )
+            try:
+                context.bot.send_message(chat_id=chat_id, text=msg)
+            except Exception as e:
+                print(f"❌ 发送失败: {e}")
+            
+            # 更新最新交易哈希
+            new_last_tx_map[contract_addr] = tx_hash
 
-    conn.commit(); conn.close()
+        # 更新数据库
+        c.execute('''
+            UPDATE bindings 
+            SET last_pol_tx = ?, last_usdt_tx = ?, last_usdc_tx = ? 
+            WHERE chat_id = ? AND address = ?
+        ''', (
+            new_last_tx_map['0x455e53bd25bde7b73cd1f4a44a0e5964e4e9a2cd'],
+            new_last_tx_map['0xc2132d05d31c914a87c6611c10748aeb04b58e8f'],
+            new_last_tx_map['0x2791bca1f2de4661ed88a30c99a7a9449aa84174'],
+            chat_id, address
+        ))
 
-async def message_handler(update, ctx):
-    t = update.message.text.strip()
-    m = re.match(r'^/绑定\s+(\S+)(?:\s+(.*))?$', t)
-    if m: return await bind_address(update, ctx, m.group(1), m.group(2) or "")
-    m = re.match(r'^/解绑\s+(\S+)$', t)
-    if m: return await unbind_address(update, ctx, m.group(1))
-    if t == '/我的绑定': return await list_bindings(update, ctx)
-    if t == '/start':
-        return await update.message.reply_text("👋 使用命令：\n/绑定 <地址> <备注>\n/解绑 <地址>\n/我的绑定")
-    await update.message.reply_text("❓ 未识别，请发 /start 获取帮助")
+    conn.commit()
+    conn.close()
 
+# === 主函数 ===
 def main():
     init_db()
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    app.job_queue.run_repeating(check_all_transactions, interval=CHECK_INTERVAL, first=5)
-    print("🤖 Bot 启动")
-    app.run_polling()
+    updater = Updater(TELEGRAM_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("绑定", bind_address))
+    dp.add_handler(CommandHandler("解绑", unbind_address))
+    dp.add_handler(CommandHandler("我的绑定", list_bindings))
+    dp.add_handler(MessageHandler(filters.text & ~filters.command, lambda u, c: u.message.reply_text("❓ 未识别指令")))
+
+    updater.job_queue.run_repeating(check_all_transactions, interval=CHECK_INTERVAL, first=5)
+    print("✅ Bot 已启动")
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == '__main__':
     main()
