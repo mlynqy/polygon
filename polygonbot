@@ -10,13 +10,6 @@ POLYGONSCAN_API_KEY = 'key'
 DB_FILE = 'db.sqlite3'
 CHECK_INTERVAL = 30
 
-# 监控的代币合约地址
-MONITORED_TOKENS = {
-    '0x455e53bd25bde7b73cd1f4a44a0e5964e4e9a2cd': {'symbol': 'POL', 'decimals': 18},  # POL代币
-    '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': {'symbol': 'USDT', 'decimals': 6},  # USDT代币
-    '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': {'symbol': 'USDC', 'decimals': 6},  # USDC代币
-}
-
 # === 初始化数据库 ===
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -27,27 +20,12 @@ def init_db():
             address TEXT NOT NULL,
             remark TEXT,
             last_tx TEXT,
-            last_pol_tx TEXT,
-            last_usdt_tx TEXT,
-            last_usdc_tx TEXT,
             PRIMARY KEY (chat_id, address)
         )
     ''')
-    # 尝试添加字段（旧用户兼容）
+    # 尝试添加 remark 字段（旧用户兼容）
     try:
         c.execute("ALTER TABLE bindings ADD COLUMN remark TEXT")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE bindings ADD COLUMN last_pol_tx TEXT")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE bindings ADD COLUMN last_usdt_tx TEXT")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE bindings ADD COLUMN last_usdc_tx TEXT")
     except:
         pass
     conn.commit()
@@ -125,91 +103,55 @@ def list_bindings(update: Update, context: CallbackContext):
         msg += f"🔗 {addr}\n📝 {remark or '无备注'}\n\n"
     update.message.reply_text(msg)
 
-# === 查询地址最新代币交易 ===
-def get_latest_token_transfers(address):
-    """获取地址的最新代币转账记录"""
+# === 查询地址最新交易 ===
+def get_latest_tx(address):
     url = (
-        f'https://api.etherscan.io/v2/api'
-        f'?chainid=137&module=account&action=tokentx&address={address}'
+        f'https://api.polygonscan.com/api'
+        f'?module=account&action=txlist&address={address}'
         f'&startblock=0&endblock=99999999&sort=desc&apikey={POLYGONSCAN_API_KEY}'
     )
     try:
         res = requests.get(url, timeout=10)
         data = res.json()
         if data.get('status') != '1':
-            return []
-        
-        # 只返回监控的代币交易
-        filtered_txs = []
-        for tx in data['result']:
-            contract_addr = tx.get('contractAddress', '').lower()
-            if contract_addr in MONITORED_TOKENS:
-                filtered_txs.append(tx)
-        
-        return filtered_txs
+            return None
+        return data['result'][0]
     except:
-        return []
+        return None
 
 # === 定时轮询交易 ===
 def check_all_transactions(context: CallbackContext):
     conn = get_db_conn()
     c = conn.cursor()
-    c.execute('SELECT chat_id, address, remark, last_pol_tx, last_usdt_tx, last_usdc_tx FROM bindings')
+    c.execute('SELECT chat_id, address, remark, last_tx FROM bindings')
     rows = c.fetchall()
 
-    for chat_id, address, remark, last_pol_tx, last_usdt_tx, last_usdc_tx in rows:
-        token_txs = get_latest_token_transfers(address)
-        if not token_txs: continue
+    for chat_id, address, remark, last_tx in rows:
+        tx = get_latest_tx(address)
+        if not tx: continue
 
-        # 按代币类型分组处理
-        last_tx_map = {
-            '0x455e53bd25bde7b73cd1f4a44a0e5964e4e9a2cd': last_pol_tx,
-            '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': last_usdt_tx,
-            '0x2791bca1f2de4661ed88a30c99a7a9449aa84174': last_usdc_tx,
-        }
-        
-        new_last_tx_map = last_tx_map.copy()
-        
-        for tx in token_txs:
-            contract_addr = tx['contractAddress'].lower()
-            tx_hash = tx['hash']
-            
-            # 跳过已处理的交易
-            if tx_hash == last_tx_map.get(contract_addr):
-                continue
-                
-            token_info = MONITORED_TOKENS[contract_addr]
-            value = int(tx['value']) / (10 ** token_info['decimals'])
-            from_addr = tx['from'].lower()
-            to_addr = tx['to'].lower()
-            direction = '📥 入账' if to_addr == address.lower() else '📤 出账'
-            sign = '+' if direction == '📥 入账' else '-'
+        tx_hash = tx['hash']
+        if tx_hash == last_tx:
+            continue  # 跳过重复
 
-            label = f"{remark} ({address})" if remark else address
-            msg = (
-                f"📢 [{label}] 有新{token_info['symbol']}交易\n"
-                f"{direction}: {sign}{value:.4f} {token_info['symbol']}\n"
-                f"🔑 交易哈希: {tx_hash}"
-            )
-            try:
-                context.bot.send_message(chat_id=chat_id, text=msg)
-            except Exception as e:
-                print(f"❌ 发送失败: {e}")
-            
-            # 更新最新交易哈希
-            new_last_tx_map[contract_addr] = tx_hash
+        value = int(tx['value']) / 1e18
+        from_addr = tx['from'].lower()
+        to_addr = tx['to'].lower()
+        direction = '📥 入账' if to_addr == address.lower() else '📤 出账'
+        sign = '+' if direction == '📥 入账' else '-'
 
-        # 更新数据库
-        c.execute('''
-            UPDATE bindings 
-            SET last_pol_tx = ?, last_usdt_tx = ?, last_usdc_tx = ? 
-            WHERE chat_id = ? AND address = ?
-        ''', (
-            new_last_tx_map['0x455e53bd25bde7b73cd1f4a44a0e5964e4e9a2cd'],
-            new_last_tx_map['0xc2132d05d31c914a87c6611c10748aeb04b58e8f'],
-            new_last_tx_map['0x2791bca1f2de4661ed88a30c99a7a9449aa84174'],
-            chat_id, address
-        ))
+        label = f"{remark} ({address})" if remark else address
+        msg = (
+            f"📢 [{label}] 有新交易\n"
+            f"{direction}: {sign}{value:.4f} MATIC\n"
+            f"🔑 交易哈希: {tx_hash}"
+        )
+        try:
+            context.bot.send_message(chat_id=chat_id, text=msg)
+        except Exception as e:
+            print(f"❌ 发送失败: {e}")
+
+        c.execute('UPDATE bindings SET last_tx = ? WHERE chat_id = ? AND address = ?', (tx_hash, chat_id, address))
 
     conn.commit()
     conn.close()
